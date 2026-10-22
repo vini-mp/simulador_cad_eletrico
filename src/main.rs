@@ -104,24 +104,36 @@ enum ComponentKind {
     Source,
     Breaker,
     Generator,
+    Transformer,
+    Busbar,
+    Load,
 }
 
 impl ComponentKind {
-    const ALL: [Self; 3] = [Self::Source, Self::Breaker, Self::Generator];
+    const ALL: [Self; 6] = [
+        Self::Source, Self::Breaker, Self::Generator,
+        Self::Transformer, Self::Busbar, Self::Load,
+    ];
 
     fn label(self) -> &'static str {
         match self {
             Self::Source => "Fonte",
             Self::Breaker => "Disjuntor",
             Self::Generator => "Gerador",
+            Self::Transformer => "Transformador",
+            Self::Busbar => "Barramento",
+            Self::Load => "Carga",
         }
     }
 
     fn icon(self) -> &'static str {
         match self {
-            Self::Source => "◉ ~",
+            Self::Source => "◉",
             Self::Breaker => "─╱─",
             Self::Generator => "Ⓖ",
+            Self::Transformer => ")))‖((",
+            Self::Busbar => "┃",
+            Self::Load => "▷",
         }
     }
 
@@ -130,6 +142,9 @@ impl ComponentKind {
             Self::Source => "F",
             Self::Breaker => "QF",
             Self::Generator => "G",
+            Self::Transformer => "T",
+            Self::Busbar => "BB",
+            Self::Load => "C",
         }
     }
 }
@@ -150,6 +165,9 @@ impl Tool {
                 ComponentKind::Source => "Inserir fonte",
                 ComponentKind::Breaker => "Inserir disjuntor",
                 ComponentKind::Generator => "Inserir gerador",
+                ComponentKind::Transformer => "Inserir transformador",
+                ComponentKind::Busbar => "Inserir barramento",
+                ComponentKind::Load => "Inserir carga",
             },
             Self::Wire => "Condutores",
             Self::Annotation => "Inserir anotação",
@@ -164,7 +182,15 @@ struct Node {
     x: f32,
     y: f32,
     reference: String,
+    /// Observações e dados livres do componente, editáveis pela janela de propriedades.
+    #[serde(default)]
+    details: String,
+    /// Altura do barramento em unidades do desenho; usada somente nesse tipo de elemento.
+    #[serde(default = "default_busbar_height")]
+    height: f32,
 }
+
+fn default_busbar_height() -> f32 { 160.0 }
 
 impl Node {
     fn pos(&self) -> Pos2 {
@@ -389,8 +415,13 @@ impl CadApp {
     }
 
     fn port_world(node: &Node, port: u8) -> Pos2 {
-        let offset = if port == 0 { -PORT_OFFSET } else { PORT_OFFSET };
-        Pos2::new(node.x + offset, node.y)
+        let effective_port = if node.kind == ComponentKind::Source { 1 } else { port };
+        let offset = if effective_port == 0 { -PORT_OFFSET } else { PORT_OFFSET };
+        if node.kind == ComponentKind::Busbar {
+            Pos2::new(node.x + offset, node.y)
+        } else {
+            Pos2::new(node.x + offset, node.y)
+        }
     }
 
     fn port_screen(&self, rect: Rect, port: PortRef) -> Option<Pos2> {
@@ -439,6 +470,8 @@ impl CadApp {
             x: self.snap_value(world.x),
             y: self.snap_value(world.y),
             reference: format!("{}{}", kind.reference_prefix(), count),
+            details: String::new(),
+            height: default_busbar_height(),
         };
         self.next_id += 1;
         self.nodes.push(node);
@@ -991,6 +1024,31 @@ impl CadApp {
                     painter.line_segment([pos + Vec2::new(NODE_RADIUS, 0.0) * scale, pos + Vec2::new(PORT_OFFSET, 0.0) * scale], stroke);
                     painter.circle_stroke(pos, NODE_RADIUS * scale, stroke);
                     painter.text(pos, Align2::CENTER_CENTER, "G", FontId::proportional(16.0 * scale.max(0.75)), symbol_color);
+                }
+                ComponentKind::Transformer => {
+                    painter.line_segment([pos + Vec2::new(-PORT_OFFSET, 0.0) * scale, pos + Vec2::new(-17.0, 0.0) * scale], stroke);
+                    painter.line_segment([pos + Vec2::new(17.0, 0.0) * scale, pos + Vec2::new(PORT_OFFSET, 0.0) * scale], stroke);
+                    for side in [-1.0_f32, 1.0_f32] {
+                        let cx = pos.x + side * 9.0 * scale;
+                        for coil in 0..3 {
+                            let cy = pos.y + (coil as f32 - 1.0) * 8.0 * scale;
+                            let direction = if side < 0.0 { -1.0 } else { 1.0 };
+                            painter.circle_stroke(Pos2::new(cx, cy), 5.5 * scale, stroke);
+                            painter.line_segment([Pos2::new(cx, cy - 5.5 * scale), Pos2::new(cx, cy + 5.5 * scale)], Stroke::new(1.0_f32, CANVAS));
+                            let _ = direction;
+                        }
+                    }
+                    painter.line_segment([pos + Vec2::new(0.0, -18.0) * scale, pos + Vec2::new(0.0, 18.0) * scale], stroke);
+                }
+                ComponentKind::Busbar => {
+                    let half = node.height.clamp(40.0, 1200.0) * 0.5 * scale;
+                    painter.line_segment([Pos2::new(pos.x, pos.y - half), Pos2::new(pos.x, pos.y + half)], Stroke::new(6.0 * scale.max(0.65), symbol_color));
+                }
+                ComponentKind::Load => {
+                    painter.line_segment([pos + Vec2::new(-PORT_OFFSET, 0.0) * scale, pos + Vec2::new(-13.0, 0.0) * scale], stroke);
+                    let points = vec![pos + Vec2::new(-13.0, -13.0) * scale, pos + Vec2::new(13.0, 0.0) * scale, pos + Vec2::new(-13.0, 13.0) * scale];
+                    painter.add(egui::Shape::convex_polygon(points, symbol_color, stroke));
+                    painter.line_segment([pos + Vec2::new(13.0, 0.0) * scale, pos + Vec2::new(PORT_OFFSET, 0.0) * scale], stroke);
                 }
             }
             let label = format!("{} · {}", node.reference, node.kind.label());
