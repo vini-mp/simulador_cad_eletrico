@@ -170,7 +170,7 @@ impl Tool {
                 ComponentKind::Load => "Inserir carga",
             },
             Self::Wire => "Condutores",
-            Self::Annotation => "Inserir anotação",
+            Self::Annotation => "Inserir texto",
         }
     }
 }
@@ -283,6 +283,13 @@ struct CadApp {
     notice: String,
     show_help: bool,
     grid_step: f32,
+    /// Identificador do componente cuja caixa de edição está aberta.
+    editing_node: Option<u64>,
+    /// Identificador do texto que está sendo editado em uma janela própria.
+    editing_annotation: Option<u64>,
+    /// Cópias temporárias usadas na caixa de diálogo para só confirmar alterações ao aceitar.
+    edit_reference: String,
+    edit_details: String,
 }
 
 impl CadApp {
@@ -329,6 +336,10 @@ impl CadApp {
             notice: "Pronto".to_owned(),
             show_help: false,
             grid_step: GRID_STEP,
+            editing_node: None,
+            editing_annotation: None,
+            edit_reference: String::new(),
+            edit_details: String::new(),
         }
     }
 
@@ -488,11 +499,11 @@ impl CadApp {
             id,
             x: self.snap_value(world.x),
             y: self.snap_value(world.y),
-            text: "Anotação".to_owned(),
+            text: "Texto".to_owned(),
         });
         self.selected_nodes.clear();
         self.selected_annotation = Some(id);
-        self.notice = "Anotação adicionada; edite o texto no painel Propriedades".to_owned();
+        self.notice = "Texto inserido; dê duplo clique para editar".to_owned();
     }
 
     fn connect_ports(&mut self, from: PortRef, to: PortRef) {
@@ -766,11 +777,11 @@ impl CadApp {
                         if Self::ribbon_button(ui, kind.icon(), kind.label(), self.tool == Tool::Place(kind), true) { self.set_tool(Tool::Place(kind)); }
                     }
                     if Self::ribbon_button(ui, "╱", "Condutores", self.tool == Tool::Wire, true) { self.set_tool(Tool::Wire); }
-                    if Self::ribbon_button(ui, "T", "Anotação", self.tool == Tool::Annotation, true) { self.set_tool(Tool::Annotation); }
+                    if Self::ribbon_button(ui, "T", "Texto", self.tool == Tool::Annotation, true) { self.set_tool(Tool::Annotation); }
                     Self::group_label(ui, "Elementos elétricos");
                 }
                 RibbonTab::Simulation => {
-                    // Controles visuais de simulação; o motor de cálculo será integrado posteriormente.
+                    ui.add_space(8.0);
                     if Self::ribbon_button(ui, "▶", "Play", false, true) { self.notice = "Simulação iniciada (modo demonstrativo)".to_owned(); }
                     if Self::ribbon_button(ui, "Ⅱ", "Pause", false, true) { self.notice = "Simulação pausada".to_owned(); }
                     if Self::ribbon_button(ui, "■", "Stop", false, true) { self.notice = "Simulação parada".to_owned(); }
@@ -855,7 +866,7 @@ impl CadApp {
         ui.separator();
         if let Some(id) = self.selected_annotation {
             if let Some(index) = self.annotations.iter().position(|a| a.id == id) {
-                ui.label(RichText::new("Anotação").strong().color(ACCENT));
+                ui.label(RichText::new("Texto").strong().color(ACCENT));
                 ui.label(RichText::new(format!("ID: {id}")).size(11.0).color(MUTED));
                 ui.label("Texto");
                 let response = ui.text_edit_multiline(&mut self.annotations[index].text);
@@ -1185,6 +1196,20 @@ impl CadApp {
         let world = self.world_from_screen(rect, pointer);
         match self.tool {
             Tool::Select => {
+                if ctx.input(|i| i.pointer.button_double_clicked(egui::PointerButton::Primary)) {
+                    if let Some(id) = self.hit_node_screen(rect, pointer) {
+                        self.begin_edit_node(id);
+                        return;
+                    }
+                    if let Some(id) = self.hit_annotation_screen(rect, pointer) {
+                        if let Some(annotation) = self.annotations.iter().find(|annotation| annotation.id == id) {
+                            self.editing_annotation = Some(id);
+                            self.edit_reference = annotation.text.clone();
+                            self.edit_details.clear();
+                        }
+                        return;
+                    }
+                }
                 if let Some(id) = self.hit_node_screen(rect, pointer) {
                     let command = ctx.input(|i| i.modifiers.command || i.modifiers.shift);
                     if command {
@@ -1229,6 +1254,64 @@ impl CadApp {
             let width = (a.text.chars().count() as f32 * 7.0 * self.zoom).max(40.0);
             Rect::from_min_size(pos, Vec2::new(width, 22.0 * self.zoom.max(0.8))).contains(screen)
         }).map(|a| a.id)
+    }
+
+    /// Abre a edição de dados do componente selecionado.
+    fn begin_edit_node(&mut self, id: u64) {
+        if let Some(node) = self.nodes.iter().find(|node| node.id == id) {
+            if node.kind == ComponentKind::Busbar { return; }
+            self.editing_node = Some(id);
+            self.edit_reference = node.reference.clone();
+            self.edit_details = node.details.clone();
+        }
+    }
+
+    /// Exibe a caixa de dados; alterações só entram no desenho ao confirmar.
+    fn draw_element_dialog(&mut self, ctx: &egui::Context) {
+        let node_id = self.editing_node;
+        let annotation_id = self.editing_annotation;
+        if node_id.is_none() && annotation_id.is_none() { return; }
+        let id = node_id.or(annotation_id).unwrap_or_default();
+        let mut open = true;
+        let title = if annotation_id.is_some() { "Editar texto" } else { "Dados do elemento" };
+        egui::Window::new(title)
+            .id(egui::Id::new("dialog_dados_elemento"))
+            .collapsible(false)
+            .resizable(true)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                if annotation_id.is_some() {
+                    ui.label("Conteúdo do texto");
+                    ui.text_edit_multiline(&mut self.edit_reference);
+                } else {
+                    ui.label("Referência / identificação");
+                    ui.text_edit_singleline(&mut self.edit_reference);
+                    ui.add_space(6.0);
+                    ui.label("Dados adicionais");
+                    ui.text_edit_multiline(&mut self.edit_details);
+                    ui.label(RichText::new("Os campos elétricos específicos serão definidos posteriormente.").size(11.0).color(MUTED));
+                }
+                ui.horizontal(|ui| {
+                    if ui.button("Confirmar").clicked() {
+                        self.push_undo();
+                        if let Some(annotation_id) = annotation_id {
+                            if let Some(annotation) = self.annotations.iter_mut().find(|annotation| annotation.id == annotation_id) {
+                                annotation.text = self.edit_reference.clone();
+                            }
+                            self.notice = "Texto atualizado".to_owned();
+                            self.editing_annotation = None;
+                        } else if let Some(node) = self.nodes.iter_mut().find(|node| node.id == id) {
+                            node.reference = self.edit_reference.clone();
+                            node.details = self.edit_details.clone();
+                            self.notice = "Dados do elemento atualizados".to_owned();
+                            self.editing_node = None;
+                        }
+                        self.dirty = true;
+                    }
+                    if ui.button("Cancelar").clicked() { self.editing_node = None; self.editing_annotation = None; }
+                });
+            });
+        if !open { self.editing_node = None; self.editing_annotation = None; }
     }
 
     fn draw_help(&mut self, ctx: &egui::Context) {
@@ -1299,5 +1382,6 @@ impl eframe::App for CadApp {
             self.paint_canvas(ui.painter_at(rect), rect, ctx);
         });
         self.draw_help(ctx);
+        self.draw_element_dialog(ctx);
     }
 }
