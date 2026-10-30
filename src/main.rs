@@ -99,6 +99,7 @@ impl RibbonTab {
     }
 }
 
+/// Tipos de elementos que podem ser colocados no diagrama.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 enum ComponentKind {
     Source,
@@ -175,6 +176,7 @@ impl Tool {
     }
 }
 
+/// Elemento elétrico com posição, identificação e propriedades editáveis.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Node {
     id: u64,
@@ -203,6 +205,7 @@ impl Node {
     }
 }
 
+/// Ligação entre os terminais de dois elementos.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 struct Wire {
     from: u64,
@@ -331,7 +334,7 @@ impl CadApp {
             clipboard_nodes: Vec::new(),
             clipboard_wires: Vec::new(),
             active_file: None,
-            project_name: "Simulador sem título".to_owned(),
+            project_name: "Simulador".to_owned(),
             dirty: false,
             notice: "Pronto".to_owned(),
             show_help: false,
@@ -457,7 +460,7 @@ impl CadApp {
             if center.distance(screen) <= (NODE_RADIUS * self.zoom).max(18.0) {
                 return Some(PortRef {
                     node_id: node.id,
-                    port: if screen.x < center.x { 0 } else { 1 },
+                    port: if node.kind == ComponentKind::Source { 1 } else if screen.x < center.x { 0 } else { 1 },
                 });
             }
         }
@@ -468,7 +471,16 @@ impl CadApp {
         self.nodes
             .iter()
             .rev()
-            .find(|node| self.screen_from_world(rect, node.pos()).distance(screen) <= (26.0 * self.zoom).max(18.0))
+            .find(|node| {
+                let center = self.screen_from_world(rect, node.pos());
+                if node.kind == ComponentKind::Busbar {
+                    let half = node.height * self.zoom * 0.5;
+                    (screen.x - center.x).abs() <= (12.0 * self.zoom).max(8.0)
+                        && screen.y >= center.y - half - 8.0 && screen.y <= center.y + half + 8.0
+                } else {
+                    center.distance(screen) <= (26.0 * self.zoom).max(18.0)
+                }
+            })
             .map(|node| node.id)
     }
 
@@ -767,8 +779,8 @@ impl CadApp {
                     if Self::ribbon_button(ui, "↖", "Selecionar", self.tool == Tool::Select, true) { self.set_tool(Tool::Select); }
                     if Self::ribbon_button(ui, "↶", "Desfazer", false, !self.undo_stack.is_empty()) { self.undo(); }
                     if Self::ribbon_button(ui, "↷", "Refazer", false, !self.redo_stack.is_empty()) { self.redo(); }
-                    if Self::ribbon_button(ui, "▣", "Copiar", false, !self.selected_nodes.is_empty()) { self.copy_selection(); }
-                    if Self::ribbon_button(ui, "▢", "Colar", false, !self.clipboard_nodes.is_empty()) { self.paste_selection(); }
+                    if Self::ribbon_button(ui, "⧉", "Copiar", false, !self.selected_nodes.is_empty()) { self.copy_selection(); }
+                    if Self::ribbon_button(ui, "▤", "Colar", false, !self.clipboard_nodes.is_empty()) { self.paste_selection(); }
                     if Self::ribbon_button(ui, "⌫", "Excluir", false, !self.selected_nodes.is_empty() || self.selected_annotation.is_some()) { self.delete_selection(); }
                     Self::group_label(ui, "Área de transferência / Edição");
                 }
@@ -815,10 +827,10 @@ impl CadApp {
                     ui.checkbox(&mut self.show_properties, "Propriedades");
                 }
                 RibbonTab::Manage => {
-                    if Self::ribbon_button(ui, "▧", "Novo", false, true) { self.new_project(); }
-                    if Self::ribbon_button(ui, "▱", "Abrir", false, true) { self.open_project(); }
-                    if Self::ribbon_button(ui, "▣", "Salvar", false, true) { self.save_project(false); }
-                    if Self::ribbon_button(ui, "▣+", "Salvar como", false, true) { self.save_project(true); }
+                    if Self::ribbon_button(ui, "▦", "Novo", false, true) { self.new_project(); }
+                    if Self::ribbon_button(ui, "▰", "Abrir", false, true) { self.open_project(); }
+                    if Self::ribbon_button(ui, "⧉", "Salvar", false, true) { self.save_project(false); }
+                    if Self::ribbon_button(ui, "＋", "Salvar como", false, true) { self.save_project(true); }
                     if Self::ribbon_button(ui, "×", "Limpar desenho", false, !self.nodes.is_empty() || !self.annotations.is_empty()) {
                         self.push_undo(); self.nodes.clear(); self.wires.clear(); self.annotations.clear(); self.selected_nodes.clear(); self.selected_annotation = None; self.pending_wire_from = None; self.notice = "Desenho limpo".to_owned();
                     }
@@ -897,6 +909,17 @@ impl CadApp {
                     changed_position |= ui.add(egui::DragValue::new(&mut self.nodes[index].y).speed(1.0).range(-10000.0..=10000.0)).changed();
                 });
                 if changed_position { self.dirty = true; }
+                if self.nodes[index].kind == ComponentKind::Busbar {
+                    ui.add_space(6.0);
+                    ui.label("Altura do barramento");
+                    if ui.add(egui::Slider::new(&mut self.nodes[index].height, 40.0..=1200.0).text("unidades")).changed() {
+                        self.dirty = true;
+                    }
+                    ui.label(RichText::new("As conexões ao barramento são mantidas na horizontal.").size(11.0).color(MUTED));
+                }
+                ui.add_space(8.0);
+                ui.label(RichText::new("Dados adicionais").strong().color(TEXT));
+                if ui.text_edit_multiline(&mut self.nodes[index].details).changed() { self.dirty = true; }
                 ui.add_space(8.0);
                 ui.label(RichText::new("Terminais").strong().color(TEXT));
                 ui.label(RichText::new("1 — Esquerdo\n2 — Direito").size(11.0).color(MUTED));
@@ -1011,7 +1034,7 @@ impl CadApp {
             if selected { painter.circle_stroke(pos, (26.0 * scale).max(20.0), Stroke::new(1.0_f32, ACCENT)); }
             match node.kind {
                 ComponentKind::Source => {
-                    painter.line_segment([pos + Vec2::new(-NODE_RADIUS, 0.0) * scale, pos + Vec2::new(-PORT_OFFSET, 0.0) * scale], stroke);
+                    // A fonte possui somente o terminal de saída à direita.
                     painter.line_segment([pos + Vec2::new(NODE_RADIUS, 0.0) * scale, pos + Vec2::new(PORT_OFFSET, 0.0) * scale], stroke);
                     painter.circle_stroke(pos, NODE_RADIUS * scale, stroke);
                     let mut wave = Vec::with_capacity(17);
@@ -1064,7 +1087,8 @@ impl CadApp {
             }
             let label = format!("{} · {}", node.reference, node.kind.label());
             painter.text(pos + Vec2::new(0.0, 24.0 * scale.max(0.75)), Align2::CENTER_TOP, label, FontId::proportional(11.5 * scale.max(0.75)), if selected { Color32::WHITE } else { TEXT });
-            for port in [0_u8, 1_u8] {
+            let ports: &[u8] = if node.kind == ComponentKind::Source { &[1] } else { &[0, 1] };
+            for &port in ports {
                 let port_pos = self.screen_from_world(rect, Self::port_world(node, port));
                 painter.circle_filled(port_pos, (3.5 * scale).max(2.5), TERMINAL);
                 painter.circle_stroke(port_pos, (4.8 * scale).max(3.5), Stroke::new(1.0_f32, CANVAS));
